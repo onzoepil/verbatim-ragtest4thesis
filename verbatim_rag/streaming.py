@@ -159,9 +159,6 @@ class StreamingRAG:
         except Exception as e:
             self.rag.k = original_k
             yield {"type": "error", "error": str(e), "done": True}
-        finally:
-            # Restore original k value even for early returns/errors
-            self.rag.k = original_k
 
     def stream_query_sync(
         self, question: str, num_docs: int = None, filter: Optional[str] = None
