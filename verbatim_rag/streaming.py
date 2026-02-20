@@ -43,25 +43,21 @@ class StreamingRAG:
             if num_docs is not None:
                 self.rag.k = num_docs
 
-            # Step 1: Retrieve documents and send them without highlights
-            # Some backends can fail if k is too large for the current collection;
-            # if that happens, reduce k progressively until query succeeds.
-            docs = None
-            last_query_error = None
-            for candidate_k in range(max(1, self.rag.k), 0, -1):
-                try:
-                    docs = self.rag.index.query(text=question, k=candidate_k, filter=filter)
-                    break
-                except Exception as e:
-                    last_query_error = e
+            # Cap retrieval k to known document count when available.
+            # Some vector stores can fail when top_k exceeds collection size.
+            effective_k = self.rag.k
+            try:
+                vector_store = getattr(self.rag.index, "vector_store", None)
+                if vector_store and hasattr(vector_store, "get_all_documents"):
+                    indexed_docs = vector_store.get_all_documents() or []
+                    if indexed_docs:
+                        effective_k = min(effective_k, len(indexed_docs))
+            except Exception:
+                # Non-fatal: continue with configured k if counting fails
+                pass
 
-            if docs is None:
-                yield {
-                    "type": "error",
-                    "error": f"retrieval_failed: {last_query_error}",
-                    "done": True,
-                }
-                return
+            # Step 1: Retrieve documents and send them without highlights
+            docs = self.rag.index.query(text=question, k=effective_k, filter=filter)
 
             documents_without_highlights = [
                 DocumentWithHighlights(
@@ -92,6 +88,8 @@ class StreamingRAG:
                     "error": f"span_extraction_failed: {e}",
                     "done": True,
                 }
+                # Restore k if needed
+                self.rag.k = original_k
                 return
             extraction_duration = time.time() - extraction_start
 
@@ -143,6 +141,7 @@ class StreamingRAG:
                     "error": f"template_processing_failed: {e}",
                     "done": True,
                 }
+                self.rag.k = original_k
                 return
             result = self.rag.response_builder.build_response(
                 question=question,
@@ -154,7 +153,11 @@ class StreamingRAG:
 
             yield {"type": "answer", "data": result.model_dump(), "done": True}
 
+            # Restore original k value if we changed it
+            self.rag.k = original_k
+
         except Exception as e:
+            self.rag.k = original_k
             yield {"type": "error", "error": str(e), "done": True}
         finally:
             # Restore original k value even for early returns/errors
