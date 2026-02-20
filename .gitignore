@@ -216,3 +216,19 @@ Thumbs.db
 
 mockup/
 research-copilot/
+
+# VerbatimRAG local runtime artifacts
+my_docs/
+index.db
+index.db-*
+milvus*.db
+*.ndjson
+*.sqlite
+*.sqlite3
+
+# Local service/runtime output
+logs/
+*.log
+
+# Local API/frontend build output (when serving built frontend via FastAPI)
+static/
