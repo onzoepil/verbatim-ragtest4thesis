@@ -37,52 +37,14 @@ class StreamingRAG:
         Yields:
             Dictionary with type and data for each stage
         """
-        original_k = self.rag.k
         try:
             # Set number of documents if specified
             if num_docs is not None:
+                original_k = self.rag.k
                 self.rag.k = num_docs
 
             # Step 1: Retrieve documents and send them without highlights
-            # Some backends can fail if k is too large for the current collection;
-            # if that happens, reduce k progressively until query succeeds.
-            docs = None
-            last_query_error = None
-            for candidate_k in range(max(1, self.rag.k), 0, -1):
-                try:
-                    docs = self.rag.index.query(text=question, k=candidate_k, filter=filter)
-                    break
-                except Exception as e:
-                    last_query_error = e
-
-            if docs is None:
-                yield {
-                    "type": "error",
-                    "error": f"retrieval_failed: {last_query_error}",
-                    "done": True,
-                }
-                return
-
-            valid_docs = [
-                doc
-                for doc in docs
-                if isinstance(getattr(doc, "text", None), str) and doc.text.strip()
-            ]
-            dropped_docs = len(docs) - len(valid_docs)
-            if dropped_docs > 0:
-                yield {
-                    "type": "progress",
-                    "stage": "dropped_empty_documents",
-                    "count": dropped_docs,
-                }
-
-            if not valid_docs:
-                yield {
-                    "type": "error",
-                    "error": "retrieval_failed: all retrieved documents were empty",
-                    "done": True,
-                }
-                return
+            docs = self.rag.index.query(text=question, k=self.rag.k, filter=filter)                
 
             documents_without_highlights = [
                 DocumentWithHighlights(
@@ -92,7 +54,7 @@ class StreamingRAG:
                     source=doc.metadata.get("source", ""),
                     metadata=doc.metadata,
                 )
-                for doc in valid_docs
+                for doc in docs
             ]
 
             yield {
@@ -105,7 +67,7 @@ class StreamingRAG:
             extraction_start = time.time()
             try:
                 relevant_spans = await asyncio.to_thread(
-                    self.rag.extractor.extract_spans, question, valid_docs
+                    self.rag.extractor.extract_spans, question, docs
                 )
             except Exception as e:
                 yield {
@@ -113,6 +75,9 @@ class StreamingRAG:
                     "error": f"span_extraction_failed: {e}",
                     "done": True,
                 }
+                # Restore k if needed
+                if num_docs is not None:
+                    self.rag.k = original_k
                 return
             extraction_duration = time.time() - extraction_start
 
@@ -122,7 +87,7 @@ class StreamingRAG:
                 "elapsed_ms": int(extraction_duration * 1000),
             }
             interim_documents = []
-            for doc in valid_docs:
+            for doc in docs:
                 doc_content = doc.text
                 doc_spans = relevant_spans.get(doc_content, [])
                 if doc_spans:
@@ -164,22 +129,25 @@ class StreamingRAG:
                     "error": f"template_processing_failed: {e}",
                     "done": True,
                 }
+                if num_docs is not None:
+                    self.rag.k = original_k
                 return
             result = self.rag.response_builder.build_response(
                 question=question,
                 answer=answer,
-                search_results=valid_docs,
+                search_results=docs,
                 relevant_spans=relevant_spans,
                 display_span_count=len(display_spans),
             )
 
             yield {"type": "answer", "data": result.model_dump(), "done": True}
 
+            # Restore original k value if we changed it
+            if num_docs is not None:
+                self.rag.k = original_k
+
         except Exception as e:
             yield {"type": "error", "error": str(e), "done": True}
-        finally:
-            # Restore original k value even for early returns/errors
-            self.rag.k = original_k
 
     def stream_query_sync(
         self, question: str, num_docs: int = None, filter: Optional[str] = None
